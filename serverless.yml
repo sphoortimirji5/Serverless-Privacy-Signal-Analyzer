@@ -1,0 +1,201 @@
+# Serverless Data Lake & Auditing Infrastructure
+
+service: privacy-signal-analyzer
+
+plugins:
+  - serverless-python-requirements
+
+custom:
+  # Environment configurations
+  stageVars: ${file(config/${sls:stage}/vars.yml)}
+  
+  pythonRequirements:
+    dockerizePip: non-linux
+    layer: true
+
+provider:
+  name: aws
+  runtime: python3.9
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+  memorySize: ${self:custom.stageVars.memorySize}
+  timeout: 300
+  logRetentionInDays: 7
+  
+  # Global environment settings
+  environment:
+    SLS_STAGE: ${sls:stage}
+    CRAWLER_NAME: ${self:custom.stageVars.crawlerName}
+    DATABASE_NAME: ${self:custom.stageVars.databaseName}
+    TABLE_NAME: ${self:custom.stageVars.tableName}
+    ATHENA_OUTPUT: 
+      Fn::Join:
+        - ""
+        - - "s3://"
+          - Ref: AthenaResultsBucket
+          - "/results/"
+
+  iam:
+    role:
+      # Stage-isolated IAM roles and S3 permissions
+      statements:
+        - ${file(config/${sls:stage}/iam.yml)}
+        # DynamoDB Export and S3 Access
+        - Effect: Allow
+          Action:
+            - dynamodb:ExportTableToPointInTime
+            - dynamodb:DescribeExport
+          Resource: !GetAtt PrivacyLogsTable.Arn
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:ListBucket
+          Resource:
+            - Fn::Join:
+                - ""
+                - - "arn:aws:s3:::"
+                  - Ref: DataLakeBucket
+            - Fn::Join:
+                - ""
+                - - "arn:aws:s3:::"
+                  - Ref: DataLakeBucket
+                  - "/*"
+
+functions:
+  # Audit Orchestrator
+  PrivacySignalAuditor:
+    handler: privacy_auditor.lambda_handler
+    description: "Enterprise-grade Privacy Signal Auditor: Discovery -> Analysis"
+    provisionedConcurrency: ${self:custom.stageVars.provisionedConcurrency}
+
+  # 1 AM Snapshot Start
+  SnapshotStart:
+    handler: snapshot_entrypoint.start_snapshot
+    description: "Triggers daily DynamoDB Export to S3 at 1 AM UTC"
+    events:
+      - schedule:
+          rate: cron(0 1 * * ? *)
+          enabled: true
+
+  # Export Completion Handler
+  SnapshotCompletionHandler:
+    handler: snapshot_entrypoint.on_export_complete
+    description: "Handles DynamoDB export completion and triggers Audit"
+    environment:
+      AUDITOR_FUNCTION_NAME: !Ref PrivacySignalAuditorLambdaFunction
+    events:
+      - eventBridge:
+          pattern:
+            source:
+              - aws.dynamodb
+            detail-type:
+              - "DynamoDB Export Table To Point In Time State Change"
+            detail:
+              exportStatus:
+                - COMPLETED
+
+resources:
+  Resources:
+    # 1. Transactional Layer: DynamoDB Table (Stage-Isolated)
+    PrivacyLogsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.stageVars.tableName}
+        AttributeDefinitions:
+          - AttributeName: user_id
+            AttributeType: S
+          - AttributeName: timestamp
+            AttributeType: S
+        KeySchema:
+          - AttributeName: user_id
+            KeyType: HASH
+          - AttributeName: timestamp
+            KeyType: RANGE
+        BillingMode: PAY_PER_REQUEST
+        SSESpecification:
+          SSEEnabled: true # Encryption at rest
+
+    # 2. Results Layer: Athena Query Results Bucket
+    AthenaResultsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:custom.stageVars.resultsBucketName}-${aws:accountId}
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
+        LifecycleConfiguration:
+          Rules:
+            - Id: CleanupOldResults
+              Status: Enabled
+              ExpirationInDays: 90
+
+    # 3. Storage Layer: S3 Data Lake (The Ingestion Destination)
+    DataLakeBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:custom.stageVars.dataLakeBucketName}-${aws:accountId}
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
+
+    # 4. Security Layer: Glue Crawler Execution Role (Least Privilege)
+    GlueCrawlerRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:custom.stageVars.glueRoleName}
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: glue.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+        Policies:
+          - PolicyName: IngestionAccess
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - dynamodb:DescribeTable
+                    - dynamodb:Scan
+                  Resource: !GetAtt PrivacyLogsTable.Arn
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:ListBucket
+                  Resource:
+                    - !GetAtt DataLakeBucket.Arn
+                    - Fn::Join:
+                        - ""
+                        - - !GetAtt DataLakeBucket.Arn
+                          - "/*"
+
+    # 5. Metadata Layer: Glue Database
+    PrivacyGlueDatabase:
+      Type: AWS::Glue::Database
+      Properties:
+        CatalogId: !Ref AWS::AccountId
+        DatabaseInput:
+          Name: ${self:custom.stageVars.databaseName}
+          Description: "Enterprise Data Catalog for privacy audit signals (${sls:stage})"
+
+    # 6. Discovery Layer: Automated Glue Crawler (S3-Targeted)
+    PrivacyGlueCrawler:
+      Type: AWS::Glue::Crawler
+      Properties:
+        Name: ${self:custom.stageVars.crawlerName}
+        Role: !GetAtt GlueCrawlerRole.Arn
+        DatabaseName: !Ref PrivacyGlueDatabase
+        Targets:
+          S3Targets:
+            - Path: !Ref DataLakeBucket
+        Schedule:
+          ScheduleExpression: "cron(0 0 * * ? *)" # Daily Midnight UTC
+        SchemaChangePolicy:
+          UpdateBehavior: UPDATE_IN_DATABASE
+          DeleteBehavior: LOG

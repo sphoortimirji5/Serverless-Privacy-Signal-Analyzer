@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+
+# Serverless
+.serverless/
+.webpack/
+.dynamodb/
+
+# OS
+.DS_Store
+Thumbs.db

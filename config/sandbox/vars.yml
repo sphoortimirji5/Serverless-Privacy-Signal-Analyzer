@@ -1,0 +1,8 @@
+crawlerName: privacy-signal-analyzer-crawler-sandbox
+databaseName: privacy_signal_analyzer_db_sandbox
+tableName: privacy-signal-analyzer-logs-sandbox
+resultsBucketName: privacy-signal-analyzer-results-sandbox
+glueRoleName: privacy-signal-analyzer-glue-role-sandbox
+provisionedConcurrency: 0
+dataLakeBucketName: privacy-signal-analyzer-lake-sandbox
+memorySize: 256

@@ -1,0 +1,9 @@
+crawlerName: privacy-signal-analyzer-crawler
+databaseName: privacy_signal_analyzer_db
+tableName: privacy-signal-analyzer-logs
+resultsBucketName: privacy-signal-analyzer-results
+glueRoleName: privacy-signal-analyzer-glue-role
+maxIngestionConcurrency: 100
+provisionedConcurrency: 25
+dataLakeBucketName: privacy-signal-analyzer-lake
+memorySize: 512
