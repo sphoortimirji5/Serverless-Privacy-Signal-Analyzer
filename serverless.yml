@@ -20,6 +20,8 @@ provider:
   stage: ${opt:stage, 'dev'}
   memorySize: ${self:custom.stageVars.memorySize}
   timeout: 300
+  tracing:
+    lambda: true
   logRetentionInDays: 7
   
   # Global environment settings
@@ -28,6 +30,9 @@ provider:
     CRAWLER_NAME: ${self:custom.stageVars.crawlerName}
     DATABASE_NAME: ${self:custom.stageVars.databaseName}
     TABLE_NAME: ${self:custom.stageVars.tableName}
+    POWERTOOLS_SERVICE_NAME: privacy-signal-analyzer
+    POWERTOOLS_METRICS_NAMESPACE: PrivacySignalAnalyzer
+    POWERTOOLS_LOGGER_LOG_EVENT: true
     ATHENA_OUTPUT: 
       Fn::Join:
         - ""
@@ -40,6 +45,12 @@ provider:
       # Stage-isolated IAM roles and S3 permissions
       statements:
         - ${file(config/${sls:stage}/iam.yml)}
+        # X-Ray Tracing Permissions
+        - Effect: Allow
+          Action:
+            - xray:PutTraceSegments
+            - xray:PutTelemetryRecords
+          Resource: "*"
         # DynamoDB Export and S3 Access
         - Effect: Allow
           Action:
